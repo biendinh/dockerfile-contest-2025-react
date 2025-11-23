@@ -1,0 +1,29 @@
+# Rust
+target/
+Cargo.lock
+
+# Docker
+.dockerignore
+
+# Build artifacts
+dist.backup/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.old
+*.backup
+
+# Keep these for contest submission
+!Dockerfile.txt
+!cosign.key
+!cosign.pub
+!slsa-provenance.json
+!slsa-provenance.bundle

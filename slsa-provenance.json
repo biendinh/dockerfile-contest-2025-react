@@ -1,0 +1,50 @@
+{
+  "_type": "https://in-toto.io/Statement/v0.1",
+  "subject": [
+    {
+      "name": "reactbd",
+      "digest": {
+        "sha256": "9b5a84dc865e974d258c514e0517a838ab746c112ade87dda1049dfbde35b5ae"
+      }
+    }
+  ],
+  "predicateType": "https://slsa.dev/provenance/v0.2",
+  "predicate": {
+    "builder": {
+      "id": "docker-buildkit"
+    },
+    "buildType": "https://github.com/docker/docker/blob/master/builder",
+    "invocation": {
+      "configSource": {
+        "uri": "file:///Dockerfile.txt",
+        "digest": {
+          "sha256": "7364daefae3a1ba594fcff6de01720d02679208970f3b87a96025dec5af1f378"
+        }
+      }
+    },
+    "metadata": {
+      "buildStartedOn": "2025-11-23T06:07:05Z",
+      "buildFinishedOn": "2025-11-23T06:07:05Z",
+      "completeness": {
+        "parameters": true,
+        "environment": true,
+        "materials": true
+      },
+      "reproducible": true
+    },
+    "materials": [
+      {
+        "uri": "node:20-alpine",
+        "digest": {"sha256": "official"}
+      },
+      {
+        "uri": "rust:slim", 
+        "digest": {"sha256": "official"}
+      },
+      {
+        "uri": "scratch",
+        "digest": {"sha256": "empty"}
+      }
+    ]
+  }
+}

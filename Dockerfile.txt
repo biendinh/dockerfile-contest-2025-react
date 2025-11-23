@@ -1,0 +1,238 @@
+# syntax=docker/dockerfile:1
+# Single-file Dockerfile with embedded Rust code - @biendinh
+
+# ============================================================================
+# Stage 1: Build React app with Vite
+# ============================================================================
+FROM node:20-alpine AS vite
+WORKDIR /app
+COPY vite-react-template/package.json vite-react-template/pnpm-lock.yaml vite-react-template/
+RUN cd vite-react-template && corepack enable && pnpm i --frozen-lockfile
+COPY vite-react-template/ vite-react-template/
+RUN cd vite-react-template && pnpm build
+
+# ============================================================================
+# Stage 2: Build Rust server with embedded assets
+# ============================================================================
+FROM rust:slim AS rust
+RUN apt-get update && apt-get install -y musl-tools upx python3 python3-brotli && \
+    rm -rf /var/lib/apt/lists/*
+RUN rustup component add rust-src
+
+WORKDIR /app
+
+# Create Rust source files inline
+RUN cat > main.rs << 'RUST_MAIN_EOF'
+#![no_std]
+#![no_main]
+#![feature(alloc_error_handler)]
+
+extern crate alloc;
+use alloc::format;
+
+include!(concat!(env!("OUT_DIR"), "/embedded.rs"));
+
+mod mini_alloc {
+    use core::alloc::{GlobalAlloc, Layout};
+    const HEAP_SIZE: usize = 1024 * 1024;
+    static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
+    static mut POS: usize = 0;
+
+    pub struct MiniAlloc;
+    unsafe impl Sync for MiniAlloc {}
+
+    unsafe impl GlobalAlloc for MiniAlloc {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            let pos = POS;
+            let align = layout.align();
+            let start = (pos + align - 1) & !(align - 1);
+            let end = start + layout.size();
+            if end > HEAP_SIZE { return core::ptr::null_mut(); }
+            POS = end;
+            core::ptr::addr_of_mut!(HEAP).cast::<u8>().add(start)
+        }
+        unsafe fn dealloc(&self, _: *mut u8, _: Layout) {}
+    }
+}
+#[global_allocator]
+static ALLOC: mini_alloc::MiniAlloc = mini_alloc::MiniAlloc;
+
+macro_rules! syscall {
+    ($n:expr) => {{ let r: u64; core::arch::asm!("syscall", in("rax") $n, lateout("rax") r, out("rcx") _, out("r11") _, options(nostack)); r }};
+    ($n:expr, $a:expr) => {{ let r: u64; core::arch::asm!("syscall", in("rax") $n, in("rdi") $a, lateout("rax") r, out("rcx") _, out("r11") _, options(nostack)); r }};
+    ($n:expr, $a:expr, $b:expr, $c:expr) => {{ let r: u64; core::arch::asm!("syscall", in("rax") $n, in("rdi") $a, in("rsi") $b, in("rdx") $c, lateout("rax") r, out("rcx") _, out("r11") _, options(nostack)); r }};
+    ($n:expr, $a:expr, $b:expr, $c:expr, $d:expr) => {{ let r: u64; core::arch::asm!("syscall", in("rax") $n, in("rdi") $a, in("rsi") $b, in("rdx") $c, in("r10") $d, lateout("rax") r, out("rcx") _, out("r11") _, options(nostack)); r }};
+}
+
+unsafe fn write(fd: i32, buf: &[u8]) -> usize { syscall!(1, fd as u64, buf.as_ptr() as u64, buf.len() as u64) as usize }
+unsafe fn read(fd: i32, buf: &mut [u8]) -> usize { syscall!(0, fd as u64, buf.as_mut_ptr() as u64, buf.len() as u64) as usize }
+unsafe fn close(fd: i32) { let _ = syscall!(3, fd as u64); }
+
+fn handle_client(fd: i32) {
+    let mut buf = [0u8; 2048];
+    let n = unsafe { read(fd, &mut buf) };
+    if n == 0 { return; }
+
+    let req = core::str::from_utf8(&buf[..n]).unwrap_or("");
+    let path = req.split(' ').nth(1).unwrap_or("/");
+    let path = if path == "/" { "/index.html" } else { path };
+
+    if let Some(file) = EMBEDDED_FILES.iter().find(|f| f.name == path) {
+        let mime: &[u8] = if path.ends_with(".html") { b"text/html" }
+                  else if path.ends_with(".js") { b"application/javascript" }
+                  else if path.ends_with(".css") { b"text/css" }
+                  else { b"application/octet-stream" };
+        
+        unsafe {
+            write(fd, b"HTTP/1.1 200 OK\r\nContent-Type: ");
+            write(fd, mime);
+            write(fd, b"\r\nContent-Encoding: br\r\nConnection: close\r\n\r\n");
+            write(fd, file.data);
+        }
+    } else {
+        unsafe { 
+            write(fd, b"HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n404 Not Found");
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn _start() -> ! {
+    unsafe {
+        let s = syscall!(41, 2, 1, 0);
+        let one: i32 = 1;
+        syscall!(54, s, 1, 2, &one as *const _ as u64);
+        let addr: [u8; 16] = [2, 0, 0x1f, 0x90, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        syscall!(49, s, &addr as *const _ as u64, 16);
+        syscall!(50, s, 128, 0);
+
+        write(1, b"Server running :8080\n");
+
+        loop {
+            let c = syscall!(43, s, 0, 0) as i32;
+            if c < 0 { continue; }
+            handle_client(c);
+            close(c);
+        }
+    }
+}
+
+#[panic_handler]
+fn panic(_: &core::panic::PanicInfo) -> ! { loop {} }
+
+#[alloc_error_handler]
+fn oom(_: core::alloc::Layout) -> ! { loop {} }
+RUST_MAIN_EOF
+
+# Create Cargo.toml
+RUN cat > Cargo.toml << 'CARGO_EOF'
+[package]
+name = "rust-react18"
+version = "0.1.0"
+edition = "2021"
+
+[profile.release]
+lto = "fat"
+opt-level = "z"
+panic = "abort"
+strip = "symbols"
+codegen-units = 1
+overflow-checks = false
+incremental = false
+
+[dependencies]
+CARGO_EOF
+
+# Create rust-toolchain.toml
+RUN cat > rust-toolchain.toml << 'TOOLCHAIN_EOF'
+[toolchain]
+channel = "nightly-2024-11-01"
+components = ["rust-src"]
+profile = "minimal"
+TOOLCHAIN_EOF
+
+# Create .cargo/config.toml
+RUN mkdir -p .cargo && cat > .cargo/config.toml << 'CARGO_CONFIG_EOF'
+[target.x86_64-unknown-linux-musl]
+rustflags = [
+  "-C", "link-arg=-nostartfiles",
+  "-C", "link-self-contained=no",
+  "-C", "relocation-model=static"
+]
+CARGO_CONFIG_EOF
+
+# Create build.rs
+RUN cat > build.rs << 'BUILD_RS_EOF'
+use std::process::Command;
+fn main() {
+    Command::new("python3").args(["embed.py", "vite-react-template/dist"])
+        .status().expect("embed.py failed");
+    println!("cargo:rerun-if-changed=vite-react-template/dist");
+}
+BUILD_RS_EOF
+
+# Create embed.py
+RUN cat > embed.py << 'EMBED_PY_EOF'
+#!/usr/bin/env python3
+import brotli, os, sys, re
+from pathlib import Path
+
+out_dir = Path(os.getenv("OUT_DIR", "."))
+out_rs = out_dir / "embedded.rs"
+
+files = []
+total_orig = 0
+total_comp = 0
+
+for p in Path(sys.argv[1]).rglob("*.*"):
+    if p.is_file():
+        data = p.read_bytes()
+        
+        if p.suffix == '.html':
+            text = data.decode('utf-8', errors='ignore')
+            text = re.sub(r'<!--.*?-->', '', text, flags=re.DOTALL)
+            text = re.sub(r'\s+', ' ', text)
+            text = re.sub(r'>\s+<', '><', text)
+            data = text.encode('utf-8')
+        
+        total_orig += len(data)
+        compressed = brotli.compress(data, quality=11, lgwin=24, mode=brotli.MODE_TEXT)
+        total_comp += len(compressed)
+        name = "/" + str(p.relative_to(sys.argv[1])).replace("\\", "/")
+        files.append((name, compressed))
+
+with open(out_rs, "w") as f:
+    f.write("pub static EMBEDDED_FILES:&[File]=&[")
+    for name, comp in files:
+        comp_str = ",".join(f"{b}" for b in comp)
+        f.write(f"File{{name:\"{name}\",data:&[{comp_str}]}},")
+    f.write("];pub struct File{pub name:&'static str,pub data:&'static [u8]}")
+
+ratio = (1 - total_comp/total_orig)*100 if total_orig > 0 else 0
+print(f"Embedded {len(files)} files: {total_orig}B → {total_comp}B ({ratio:.1f}% saved)")
+EMBED_PY_EOF
+
+# Create src directory and move main.rs
+RUN mkdir src && mv main.rs src/
+
+# Copy dist from vite stage
+COPY --from=vite /app/vite-react-template/dist ./vite-react-template/dist
+
+# Build with aggressive optimization
+RUN cargo build --release \
+    -Z build-std=core,alloc,compiler_builtins \
+    -Z build-std-features=compiler-builtins-mem,optimize_for_size \
+    --target x86_64-unknown-linux-musl && \
+    cp target/x86_64-unknown-linux-musl/release/rust-react18 /server && \
+    strip --strip-all /server && \
+    upx --best --ultra-brute /server || true && \
+    ls -lh /server
+
+# ============================================================================
+# Stage 3: Runtime (scratch - empty base)
+# ============================================================================
+FROM scratch
+COPY --from=rust /server /
+EXPOSE 8080
+STOPSIGNAL SIGKILL
+ENTRYPOINT ["/server"]
